@@ -10,6 +10,8 @@
 [Documentation](https://docs.nvidia.com/nemo/megatron-bridge/latest/) | [Supported Models](#supported-models) | [Examples](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/main/examples) | [Contributing](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/CONTRIBUTING.md)
 </div>
 
+> **Fork note:** This fork extends Megatron Bridge with an EMA (Exponential Moving Average) callback for pretraining. EMA state is persisted as a sidecar checkpoint alongside the main checkpoint and restored automatically on resume. See [Pretraining with EMA](#-pretraining-with-ema-custom-extension) for details.
+
 ## 📣 News
 * [12/16/2025] [Mind Lab](https://macaron.im/mindlab) successfully used Megatron-bridge and [VeRL](https://github.com/volcengine/verl) to trained GRPO Lora for Trillion-parameter model on 64 H800 - See their [techblog](https://macaron.im/mindlab/research/building-trillion-parameter-reasoning-rl-with-10-gpus).
 * [12/15/2025] Day 0 support for [NVIDIA-NeMotron-3-Nano-30B-A3B-FP8](https://huggingface.co/nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8)! [Reproducible code](https://github.com/NVIDIA-NeMo/Megatron-Bridge/tree/nano-v3) and custom NGC container: [nvcr.io/nvidia/nemo:25.11.nemotron_3_nano](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/nemo?version=25.11.nemotron_3_nano)
@@ -109,6 +111,81 @@ More examples:
 - [Toy RLHF with Bridge (HF inference + Megatron training)](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/examples/rl/rlhf_with_bridge.py)
 
 For a deeper dive into conversion design and advanced usage, see the [models README](https://github.com/NVIDIA-NeMo/Megatron-Bridge/blob/main/src/megatron/bridge/models/README.md).
+
+## 🧮 Pretraining with EMA (Custom Extension)
+
+This fork adds an Exponential Moving Average (EMA) callback for pretraining via [`EMA.py`](EMA.py) and the launcher [`train_with_ema.py`](train_with_ema.py).
+
+The EMA implementation is **non-intrusive**: the main checkpoint (online weights, optimizer, scheduler, RNG) is never modified. EMA is stored as a **sidecar checkpoint** under the same iteration directory and restored automatically on resume.
+
+### Checkpoint layout
+
+```text
+<checkpoint_root>/
+└── iter_0000010/
+    ├── common.pt
+    ├── metadata.json
+    ├── ...
+    └── ema_state/
+        └── rank_00000.pt   # stores ema_state, ema_updates, ema_skipped_iters
+```
+
+### Running pretraining with EMA
+
+```bash
+torchrun --nproc-per-node=1 train_with_ema.py \
+  --train-iters 10 \
+  --use-ema \
+  --ema-decay 0.999 \
+  --ema-log-interval 2 \
+  --save ./nemo_experiments/default/checkpoints
+```
+
+**Key arguments:**
+
+| Argument | Default | Description |
+|---|---|---|
+| `--use-ema` | `False` | Enable EMA tracking |
+| `--ema-decay` | `0.95` | EMA decay factor |
+| `--ema-start-step` | `0` | Step at which EMA begins updating |
+| `--ema-store-on-cpu` | `False` | Store EMA shadow weights on CPU |
+| `--ema-log-interval` | `5` | Log EMA stats every N steps |
+| `--save` | required | Checkpoint directory |
+| `--load` | `None` | Directory to resume from |
+
+> **Note:** `checkpoint.async_save` is automatically set to `False` when using the EMA launcher, which is required for sidecar persistence.
+
+### training with EMA
+
+Pass `--load` pointing to the same checkpoint directory. The launcher will restore both the main checkpoint and the EMA sidecar from the latest saved iteration:
+
+```bash
+torchrun --nproc-per-node=1 train_with_ema.py \
+  --train-iters 20 \
+  --use-ema \
+  --ema-decay 0.999 \
+  --ema-log-interval 2 \
+  --save ./nemo_experiments/default/checkpoints \
+  --load ./nemo_experiments/default/checkpoints
+```
+
+On resume you will see:
+
+```text
+Restored EMA sidecar from .../iter_0000010/ema_state/rank_00000.pt (updates=10, skipped=0)
+[EMA] resumed | decay=0.999 | start_step=0 | updates=10 | skipped_seen=0
+```
+
+### EMA training logs
+
+During training the callback logs progress at each `--ema-log-interval` step:
+
+```text
+[EMA] step=0 | updates=1  | skipped_seen=0 | mean_abs_diff=...
+[EMA] step=2 | updates=3  | skipped_seen=0 | mean_abs_diff=...
+```
+
+`mean_abs_diff` measures how far the EMA shadow weights have drifted from the online weights — a lightweight signal that EMA is active and updating correctly.
 
 ## 🚀 Key Features
 
